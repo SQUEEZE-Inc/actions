@@ -1,0 +1,59 @@
+name: Safe Chain
+description: >
+  Install Aikido Safe Chain so that npm / npx / pnpm / yarn / bun / pip / uv / poetry
+  in later steps block known malware and package versions younger than the minimum age
+  before download (SRE-306).
+  Run it AFTER setup-node / setup-python / setup-uv / pnpm setup and BEFORE any install step:
+  setup-* actions prepend their own bin directories to PATH and would shadow the shims.
+
+inputs:
+  version:
+    description: Safe Chain release tag. Bump together with installer-sha256.
+    default: "1.5.25"
+  installer-sha256:
+    description: SHA-256 of install-safe-chain.sh for that release (from the Safe Chain README).
+    default: "83069f6db4215cccf6a26bdd6e65a5c2366b9d24322b2d5d2862d47385e56682"
+  minimum-package-age-hours:
+    description: Block versions published less than this many hours ago. Empty keeps the Safe Chain default (48).
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install Safe Chain
+      shell: bash
+      env:
+        SAFE_CHAIN_VERSION: ${{ inputs.version }}
+        INSTALLER_SHA256: ${{ inputs.installer-sha256 }}
+        MIN_AGE_HOURS: ${{ inputs.minimum-package-age-hours }}
+      run: |
+        set -euo pipefail
+        if [ "$RUNNER_OS" = "Windows" ]; then
+          echo "::error::safe-chain action supports Linux and macOS runners only"
+          exit 1
+        fi
+        installer="$(mktemp)"
+        curl -fsSL "https://github.com/AikidoSec/safe-chain/releases/download/${SAFE_CHAIN_VERSION}/install-safe-chain.sh" -o "$installer"
+        echo "${INSTALLER_SHA256}  ${installer}" | shasum -a 256 -c -
+        # --ci creates the shims and adds them (and the binary) to $GITHUB_PATH.
+        sh "$installer" --ci
+        rm -f "$installer"
+        if [ -n "$MIN_AGE_HOURS" ]; then
+          echo "SAFE_CHAIN_MINIMUM_PACKAGE_AGE_HOURS=${MIN_AGE_HOURS}" >> "$GITHUB_ENV"
+        fi
+
+    - name: Verify Safe Chain
+      shell: bash
+      run: |
+        set -euo pipefail
+        safe-chain --version
+        # A shim exists for every tool, so a tool resolving elsewhere means a real binary
+        # is ahead of the shims on PATH (typically a setup-* step placed before this one).
+        shims="$HOME/.safe-chain/shims"
+        for tool in npm npx pnpm yarn bun pip pip3 uv uvx poetry; do
+          path="$(command -v "$tool" || true)"
+          case "$path" in
+            "$shims"/*) echo "ok   $tool -> $path" ;;
+            *) echo "::error::$tool resolves to '$path', not the Safe Chain shim"; exit 1 ;;
+          esac
+        done
